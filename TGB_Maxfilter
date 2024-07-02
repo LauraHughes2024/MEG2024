@@ -1,0 +1,298 @@
+% Action Task TGB  Max Filter version 2.2
+% standard sss with ST and movecopmp and then trans to default space
+%
+clear all
+addpath /neuro/meg_pd_1.2
+addpath /imaging/local/meg_misc/
+
+%% Matlab pool 
+% ParType = 0;  % Fun on Login machines (not generally advised!)
+ParType = 1;   % Run maxfilter call on Compute machines using spmd (faster)
+%ParType = 2;   % Run on multiple Compute machines using parfor (best, but less feedback if crashes)
+
+% open matlabpool if required
+% matlabpool close force CBU_Cluster
+if ParType
+NumWorkers = 11
+P = cbupool(NumWorkers);
+P.SubmitArguments = sprintf('--ntasks=%d --mem-per-cpu=8G --time=12:00:00 --constraint=maxfilter',NumWorkers);
+parpool(P,NumWorkers)
+end
+
+whichsubs = 'Con'; % Con or Pat
+
+if strcmp(whichsubs , 'Con' )
+    All_Sub = TGB_SubsData_Controls(); 
+   dosubs = [1 : 20]; 
+else
+    All_Sub = TGB_SubsData_Patients();
+  dosubs =  [ 2 3 8 9 13 14 18 19 21 22 24 25 26 28 29 30 31 32 34 37 39 40]; % only those who attempted this task
+end
+    
+Nsub     = length(dosubs);
+meg_badchans = ['0813 '] %;
+
+% Which MF process to run
+badchanflag = 1;
+badchancountflag = 1;
+maxsssflag = 1
+maxtransflag = 1
+chancheckflag = 0
+
+% settings
+trans_offset_maxf = [0 -13 +6];
+
+for count_n = 1:length(dosubs)
+    for sess = 1:2
+    n = dosubs(count_n) ;
+    
+    % make a dir to put the new MF sss files in
+    if exist(All_Sub{n}.MFpath{1})~=7; mkdir(All_Sub{n}.MFpath{1});end %S1
+    if exist(All_Sub{n}.MFpath{2})~=7; mkdir(All_Sub{n}.MFpath{2});end %S2
+    if exist(All_Sub{n}.megpath{1})~=7; mkdir(All_Sub{n}.megpath{1});end %S1
+    if exist(All_Sub{n}.megpath{2})~=7; mkdir(All_Sub{n}.megpath{2});end %S2
+    
+    % *** select raw data in cbu dir **
+    rawfiles{n}.rp1{sess} = strcat('/megdata/cbu/ftdrug/',All_Sub{n}.Name{sess}, '/'); %
+    rawfiles{n}.rp2{sess} = dir(rawfiles{n}.rp1{sess});
+    rawfiles{n}.rawpath{sess} = strcat(rawfiles{n}.rp1{sess}, rawfiles{n}.rp2{sess}(3).name, '/');
+ 
+    rawfiles{n}.allraw{sess} = spm_select('List', rawfiles{n}.rawpath{sess}, '.*raw.*fif')  ;%% all files
+    rawfiles{n}.allraw1{sess} = lower(rawfiles{n}.allraw{sess})  ;%change to lower case
+    rawfiles{n}.allraw_acts{sess} = [];
+    
+    for nnn = 1:size(rawfiles{n}.allraw1{sess},1)
+        if strfind(rawfiles{n}.allraw1{sess}(nnn,:),'ac')
+            rawfiles{n}.allraw_acts{sess} = [rawfiles{n}.allraw_acts{sess}; rawfiles{n}.allraw{sess}(nnn,:)];
+        end
+    end
+   rawfiles{n}.allraw{sess} = rawfiles{n}.allraw_acts{sess};
+    rawfiles{n}.Numoffiles{sess} = size(rawfiles{n}.allraw{sess},1) ; %number of files
+    
+    end
+end
+
+
+    %************************************************************%
+    %                 Loop through sessions                      %
+    %************************************************************%
+    for count_n = 1:length(dosubs)
+        n = dosubs(count_n) ;
+        for sess = 1:2
+            for k = 1:rawfiles{n}.Numoffiles{sess} %raw file to process (act1 act 2 etc)
+                
+                
+                clear cmdb;  clear cmd; clear badchstr; clear badch
+                clear headpoints; clear fit
+                                
+                filename = strcat(rawfiles{n}.rawpath{sess}, rawfiles{n}.allraw{sess}(k,:) ); %1st raw file in dir
+                subname = All_Sub{n}.Name{sess} ;
+                rfxdir = All_Sub{n}.MFpath{sess} ;
+ 
+                %************************************************************%
+                %          headpos code Fit sphere to HPI points             %
+                %************************************************************%
+                
+                %*** option for head points from riks pipeline ***
+                %
+                headptsfile  = sprintf('%s%s_headpoints_%s.txt',rfxdir,subname,num2str(k))  ;
+                [co ki] = hpipoints(filename);
+                headpoints = co(:,ki>1)'; % don't include the fiducial points
+                headpoints = headpoints(~(headpoints(:,2)>0 & headpoints(:,3)<0),:);% Remove nose points
+                cd(rfxdir)
+                save('hpipoints.txt', '-ASCII', 'headpoints')
+                cmd_fit = '/neuro/bin/util/fit_sphere_to_points hpipoints.txt';% Fit sphere:
+                [status spherefit] = unix(cmd_fit);
+                if length(spherefit) < 1;
+                    error('Spherefit failed!')
+                end
+                fit = str2num(spherefit)*1000; % m to mm;
+                fit1  = num2str(fit(1));
+                fit2  = num2str(fit(2));
+                fit3  = num2str(fit(3));
+                % use in -frame head -origin
+                allfits{n,sess}.(sprintf('k%s',num2str(k)))  = [fit1, ' ', fit2, ' ', fit3] ;
+                
+                %************************************************************%
+                %                 get  bad channels                          %
+                %************************************************************%
+                
+                if  badchanflag
+                    cmdb{1} =sprintf(' /neuro/bin/util/maxfilter-2.2 ');
+                    cmdb{2} =sprintf(' -f %s',filename );
+                    cmdb{3} =sprintf(' -o %s%s_act%s_badCH.fif ',rfxdir, subname, num2str(k) );
+                    cmdb{4} =sprintf(' -ctc /neuro/databases/ctc/ct_sparse.fif ');
+                    cmdb{5} =sprintf(' -cal /neuro/databases/sss/sss_cal.dat ');
+                    cmdb{6} =sprintf(' -ds 2 -format short -hpistep 1000 -hpisubt amp -in 8  -out 3 ');
+                    cmdb{7} =sprintf(' -force -frame head -origin ');
+                    cmdb{8} = sprintf(' %s %s %s', fit1, fit2, fit3);
+                    cmdb{9} = sprintf(' -autobad 20' ); %-skip 20.0 9999.0 ');
+                    cmdb{10} =sprintf(' -v | tee %s%s_act%s_bad_logfile.log ', rfxdir, subname, num2str(k) );
+                    
+                    % select which commands to run
+                    cmd_badgo{n,sess}.(sprintf('k%s',num2str(k))) = strcat(cmdb{1}, cmdb{2}, cmdb{3}, cmdb{4}, cmdb{5}, cmdb{7}, cmdb{8}, cmdb{9}, cmdb{10} );
+                    
+                end
+            end %file
+        end %sess
+    end %subs
+
+    % run in parallel 
+if badchanflag
+    parfor count_n = 1:length(dosubs) %parfor
+        n = dosubs(count_n) ;
+        for sess = 1:2
+            for k = 1:rawfiles{n}.Numoffiles{sess} %raw file to process (act1 act 2 etc)
+               unix(cmd_badgo{n,sess}.(sprintf('k%s',num2str(k))) );  
+            end
+        end
+    end
+end
+
+% Get list of badchannels
+for count_n = 1:length(dosubs)
+    n = dosubs(count_n) ;
+    for sess = 1:2
+        for k = 1:rawfiles{n}.Numoffiles{sess} %raw file to process (act1 act 2 etc)
+            
+            %
+             filename = strcat(rawfiles{n}.rawpath{sess}, rawfiles{n}.allraw{sess}(k,:) ); %1st raw file in dir
+             subname = All_Sub{n}.Name{sess} ;
+             rfxdir = All_Sub{n}.MFpath{sess} ;
+              cd(  rfxdir)
+                     
+            %get bad channels into a variable as strings from log file and save as
+            %sub_badchanfile
+            getbadch= sprintf('cat %s%s_act%s_bad_logfile.log | sed -n ''''/Static/p'''' | cut -f 5- -d '' '' | tee %s%s_action%s_badchanfile.txt ', rfxdir,subname,num2str(k) ,rfxdir,subname,num2str(k) );
+            [dnr, bcs] = unix(getbadch);
+            allbadch=str2num(bcs); %turn into nums
+            badchstr=['0813 ' ]; % [] to include listed badchans from recording
+            for xyz =1:size(allbadch,2) %individual variables into strings
+                badch{xyz} = num2str(allbadch(1,xyz));
+                badchstr = [badchstr, ' ', badch{xyz}, ' '];
+            end
+            %list everyones bad chans
+            badchstr_list{n,sess}{k} = badchstr ;
+            
+            
+            
+            %************************************************************%
+            %                      MF SSS                                %
+            %************************************************************%
+            % automate sss with movecomp and st.....
+          
+            
+            inputfile =  filename ; %raw files for sss
+            sssfile1{n,sess}.(sprintf('k%s',num2str(k))) = sprintf('act%s_sss_%s_wods.fif',num2str(k), subname);
+          
+            
+            if maxsssflag
+                cmd{1} ='/neuro/bin/util/maxfilter-2.2 ';
+                cmd{2} =sprintf(' -f %s', filename );
+                cmd{3} =sprintf(' -o %s%s', rfxdir, sssfile1{n,sess}.(sprintf('k%s',num2str(k))));
+                cmd{4} =sprintf(' -hp %s/action_sss_pos_%s_%s.pos', rfxdir, subname, num2str(k)) ;
+                cmd{5} = sprintf (' -autobad off -bad %s ', badchstr);%badchstr ; % for SSS
+                cmd{6} =' -force -frame head -origin ';
+                cmd{7} = sprintf(' %s', allfits{n,sess}.(sprintf('k%s',num2str(k))) );
+                cmd{8} = ' -ctc /neuro/databases/ctc/ct_sparse.fif ';
+                cmd{9} = ' -cal /neuro/databases/sss/sss_cal.dat ';
+                cmd{10} = ' -st  ' ;  % -hpisubt amp -hpistep 200-format float%hpisubt removed high freq hpi
+                cmd{11} = '  -movecomp inter  '; % %-skip 0 20.0
+                cmd{12} =sprintf(' -v | tee %s_%s_ssslogfileMC.log ', subname, num2str(k)) ;
+                cmd{112} =sprintf(' -v | tee %s_%s_ssslogfile.log ', subname, num2str(k)) ;
+                                
+                %movecomp & ST
+                cmd_sssgo{n,sess}.(sprintf('k%s',num2str(k))) = strcat(cmd{1}, cmd{2}, cmd{3}, cmd{4}, cmd{5}, cmd{6}, cmd{7}, cmd{8}, cmd{9}, cmd{10}, cmd{11}, cmd{12});
+              
+                %if movecomp fails with ST
+                 sssfile2{n,sess}.(sprintf('k%s',num2str(k))) = sprintf('act%s_sss_%s_wods_womc.fif',num2str(k), subname);
+                 cmd{13} =sprintf(' -o %s%s', rfxdir, sssfile2{n,sess}.(sprintf('k%s',num2str(k))));
+                 cmd_sssgo_nmc{n,sess}.(sprintf('k%s',num2str(k))) =strcat(cmd{1}, cmd{2}, cmd{13}, cmd{4}, cmd{5}, cmd{6}, cmd{7}, cmd{8}, cmd{9}, cmd{10}, cmd{12});
+                
+                %unix(cmd_sssgo)
+                cd(rfxdir)
+                sss1donealready{n,sess}.(sprintf('k%s',num2str(k))) = numel(dir(sssfile1{n,sess}.(sprintf('k%s',num2str(k))) ) );
+                sss2donealready{n,sess}.(sprintf('k%s',num2str(k))) = numel(dir(sssfile2{n,sess}.(sprintf('k%s',num2str(k))) ) );
+            end
+            
+        end %ses
+    end
+end %subs
+
+if maxsssflag
+    %% SSS w movecomp
+    for count_n = 1:length(dosubs) %parfor
+        n = dosubs(count_n) ;
+        for sess = 1:2
+            for k = 1:rawfiles{n}.Numoffiles{sess}
+                if sss1donealready{n,sess}.(sprintf('k%s',num2str(k))) < 1
+                    cd(All_Sub{n}.MFpath{sess})
+                    unix(cmd_sssgo{n,sess}.(sprintf('k%s',num2str(k))));
+                end
+            end
+        end
+    end
+    
+   
+    
+    % if Maxfilter failed try without movecomp, but check file for
+    % artefacts
+    % in the TGB dataset no files failed the above maxfilter
+    fileswithoutmc = [];
+    for count_n = 1:length(dosubs)
+        n = dosubs(count_n);
+        for sess = 1:2
+            for k = 1:rawfiles{n}.Numoffiles{sess}
+                cd(All_Sub{n}.MFpath{sess})
+                if ~exist( sssfile1{n,sess}.(sprintf('k%s',num2str(k))) )
+                    unix(cmd_sssgo_nmc{n,sess}.(sprintf('k%s',num2str(k))));
+                    fileswithoutmc = [fileswithoutmc; n, k];
+                end
+                
+            end
+        end
+    end
+
+end
+
+%%%%% Now Trans to Default - files are separated by 30 mins
+% take  output file (*sss*.fif) and trans it.
+
+if maxtransflag
+    for count_n = 1:length(dosubs)
+        n = dosubs(count_n);
+        for sess = 1:2
+            for k = 1:rawfiles{n}.Numoffiles{sess} %raw file to process (act1 act 2 etc)
+                
+                %
+                filename = strcat(rawfiles{n}.rawpath{sess}, rawfiles{n}.allraw{sess}(k,:) ); %1st raw file in dir
+                subname = All_Sub{n}.Name{sess} ;
+                rfxdir = All_Sub{n}.MFpath{sess} ;
+                
+                
+                inputfile =  sssfile1{n,sess}.(sprintf('k%s',num2str(k)));
+                transfile = sprintf('act%s_trans_%s.fif',num2str(k), subname);
+                
+                
+                cmd{1} =sprintf(' /neuro/bin/util/maxfilter-2.2 ');
+                cmd{2} =sprintf(' -f  %s%s ',rfxdir, inputfile );
+                cmd{3} =sprintf(' -o %s%s ',rfxdir, transfile);
+                cmd{4} =sprintf(' -trans default ' );
+                %cmd{5} = sprintf ('-autobad off -bad 0612 %s ', badchstr);%badchstr ; % for SSS
+                cmd{6} =' -force -frame head -origin ';
+                cmd{7} = sprintf(' %s', allfits{n,sess}.(sprintf('k%s',num2str(k))) );
+                %cmd{5} =sprintf(' -ctc /neuro/databases/ctc/ct_sparse.fif ');
+                %cmd{6} =sprintf(' -cal /neuro/databases/sss/sss_cal.dat ');
+                %cmd{7} = sprintf(' -skip 0 20.0 ');
+                cmd{8} =sprintf(' -v | tee %saction_logfile_trans_%s_%s.log ', rfxdir, subname, num2str(k) );
+                
+                cmd_transgo{n,sess}.(sprintf('k%s',num2str(k))) = strcat(cmd{1}, cmd{2}, cmd{3}, cmd{4}, cmd{6}, cmd{7}, cmd{8});
+                %unix(cmd_transgo)
+                
+            end %k
+        end %sess
+
+    end %subs
+ 
+end %if maxtrans
+
