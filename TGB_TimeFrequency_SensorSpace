@@ -1,0 +1,419 @@
+% TGB Car Task Preprocessing Time Frequency in Sensor Space pipeline
+% spm('defaults', 'eeg');
+% TF analysis on Gradiometers only cropped all other channels out
+% use for TBT (trial by trial) analysis: no avg across trials
+
+clear all
+wd = '/imaging/lh01/FTD2015/MEG_DATA/ActionTask/';
+mripath = '/imaging/lh01/FTD2015/MRIs/';
+cd(wd)
+
+%% Matlab pool
+% ParType = 0;  % Fun on Login machines (not generally advised!)
+ParType = 1;   % Run maxfilter call on Compute machines using spmd (faster)
+%ParType = 2;   % Run on multiple Compute machines using parfor (best, but less feedback if crashes)
+
+% open matlabpool if required
+% matlabpool close force CBU_Cluster
+if ParType
+    NumWorkers = 11
+    P = cbupool(NumWorkers);
+    P.SubmitArguments = sprintf('--ntasks=%d --mem-per-cpu=8G --time=12:00:00 --constraint=maxfilter',NumWorkers);
+    parpool(P,NumWorkers)
+end
+
+whichsubs = 'Con'; % Con or Pat
+
+if strcmp(whichsubs , 'Con' )
+    All_Sub = TGB_SubsData_Controls();
+else
+    All_Sub = TGB_SubsData_Patients();
+end
+
+
+%% which subs to run
+dosubs = [];
+for sub = 1:length(All_Sub)
+    if All_Sub{sub}.CarTask == 1
+        dosubs = [dosubs sub];
+    end
+end
+
+Nsub     = length(dosubs);
+
+%% ***** Set Flags for which steps to run  *********
+docrop = 1;%
+tfanalysis = 1; %set up TF
+doTF =1;% % do TF
+docontrast = 0 %make w2tf file
+docontrast1 = 0; %write imagesdocontrast1
+
+docontrast_alltrials = 0;
+docontrast_speed = 0;
+
+docontrast2 = 0;%write images: not using scalp
+delete_files = 0;
+datatypes={'EEG', 'MEGPLANAR', 'MEG'};
+
+
+
+
+% ***********************************************************************%% 
+%               1. Get all file names
+%  ***********************************************************************
+for sub=1:Nsub
+    subnum    = dosubs(sub);
+    % set up dir
+    All_Sub{subnum}.coreg_file{1} = spm_select('FPlist', All_Sub{subnum}.megpath{1}, '^cpaeM.*act1_trans.*.mat'  );
+    All_Sub{subnum}.coreg_file{2} = spm_select('FPlist', All_Sub{subnum}.megpath{2}, '^cpaeM.*act1_trans.*.mat'  );
+    
+    if length(All_Sub{subnum}.coreg_file{1}) < 10
+        All_Sub{subnum}.coreg_file{1} = spm_select('FPlist', All_Sub{subnum}.megpath{1}, '^paeM.*act1_trans.*.mat'  );
+    end
+    if length(All_Sub{subnum}.coreg_file{2}) < 10
+        All_Sub{subnum}.coreg_file{2} = spm_select('FPlist', All_Sub{subnum}.megpath{2}, '^paeM.*act1_trans.*.mat'  );
+    end
+    
+    All_Sub{subnum}.rPtf_file{1} = spm_select('FPlist', All_Sub{subnum}.megpath{1}, '^rPtf.*act1_trans.*.mat'  );
+    All_Sub{subnum}.rPtf_file{2} = spm_select('FPlist', All_Sub{subnum}.megpath{2}, '^rPtf.*act1_trans.*.mat'  );
+    
+ 
+   All_Sub{subnum}.Scrop_name{1} = spm_select('FPlist', All_Sub{subnum}.megpath{1}, '^cpaeMf*.*mat' ) %strcat(base_filename,ext);
+   All_Sub{subnum}.Scrop_name{2} = spm_select('FPlist', All_Sub{subnum}.megpath{2}, '^cpaeMf*.*mat' ) %strcat(base_filename,ext);
+   
+   % if filename not found try without c (concatenated)
+   if length(All_Sub{subnum}.Scrop_name{1}) < 5
+         All_Sub{subnum}.Scrop_name{1} = spm_select('FPlist', All_Sub{subnum}.megpath{1}, '^paeMf*.*mat' )   
+   end
+   if length(All_Sub{subnum}.Scrop_name{2}) < 5
+         All_Sub{subnum}.Scrop_name{2} = spm_select('FPlist', All_Sub{subnum}.megpath{2}, '^paeMf*.*mat' )   
+   end
+   
+   overwritefilesok{subnum} = size(All_Sub{subnum}.coreg_file{2},2);
+end
+%% ***********************************************************************
+
+
+% ***********************************************************************%% 
+%               2. Crop files to just Grads
+%  ***********************************************************************
+if docrop
+    
+    Scrop = [];
+    
+    Scrop.timewin = [-inf inf];
+    Scrop.freqwin = [-inf inf];
+    Scrop.channels = 'MEGPLANAR';
+    Scrop.prefix = 'p';
+    
+    for subsub=1:Nsub %parfor
+        for subsess = 1:2
+            %step 1: TF analysis
+            subnum = dosubs(subsub) ;
+            cd( All_Sub{subnum}.megpath{subsess})
+            SS = Scrop;
+            SS.D =  All_Sub{subnum}.Scrop_name{subsess};
+            testfilename11 = spm_select('FPlist', All_Sub{subnum}.megpath{subsess}, '^pcpae*.*mat');
+            if length(testfilename11)<11
+                testfilename11 = spm_select('FPlist', All_Sub{subnum}.megpath{subsess}, '^pae*.*mat');
+            end
+            if length(testfilename11)<10
+                D=spm_eeg_crop(SS)
+                
+            end
+        end
+    end
+    
+end
+
+%% ***********************************************************************
+%% *                      3. Set up Time Frequency parameters            *
+%% ***********************************************************************
+
+if tfanalysis
+    
+    %% TF analysis set up: files
+    for subsub=1:Nsub
+        for subsess=1:2
+        subnum = dosubs(subsub) ;
+        cd(All_Sub{subnum}.megpath{subsess})
+        
+        
+        %tf file
+        All_Sub{subnum}.Stfname{subsess} =spm_select('FPlist', All_Sub{subnum}.megpath{subsess}, '^cpaeMf*.*mat' ) 
+       if  length(All_Sub{subnum}.Stfname{subsess}) < 10
+           All_Sub{subnum}.Stfname{subsess} =spm_select('FPlist', All_Sub{subnum}.megpath{subsess}, '^paeMf*.*mat' ) 
+       end
+        
+        [path, base_filename, ext]  =fileparts(All_Sub{subnum}.Stfname{subsess}  ) ;
+        filename{subnum,subsess} = strcat(base_filename, ext); %% used to find subsequent files
+        testfilename{subnum,subsess} = spm_select('FPlist', All_Sub{subnum}.megpath{subsess}, '^tf_*.*mat');
+        
+        %inputfile names
+        %combine 'P'
+        All_Sub{subnum}.Scpname{subsess}  = strcat(All_Sub{subnum}.megpath{subsess}, 'tf_', filename{subnum,subsess});
+        % rescale 'r'
+        All_Sub{subnum}.Srsname{subsess}  = strcat(All_Sub{subnum}.megpath{subsess}, 'P', 'tf_', filename{subnum,subsess});
+        % avg 'm'
+          All_Sub{subnum}.Saname{subsess}  = strcat(All_Sub{subnum}.megpath{subsess}, 'r', 'Ptf_',  filename{subnum,subsess}); 
+        end
+        
+    end
+    
+    %step 1: TF analysis
+        Stf = [];
+        Stf.channels= {'MEGPLANAR'}; %%
+        Stf.frequencies= [6:2:80]; %
+        Stf.settings.timewin = [-Inf Inf]; %[-800 2200]
+        Stf.phase= 0; %save phase not poss with multitaper
+        Stf.prefix= ''; %
+        %% TF type
+        Stf.method= 'morlet'; %'mtmconvol'; %'morlet' ;%'mtmconvol' ; %; %'mtmconvol';
+        Stf.ncycles = 7; %default
+
+
+        %step 2 combine planars 'P'
+        Scp = [];
+        Scp.mode = 'replace';
+        Scp.prefix = 'P';
+      
+        %step 3 rescale 'r'
+        Srs=[];
+        Srs.method='LogR';
+        Srs.timewin=[-Inf 0];
+        
+       %  step 4: average over trials 'm' dont do for TBT analyses
+       % Power data of single trials (see %sec. 12.8.10) can also be averaged by
+        % using the function spm eeg average TF. The prepended output letter is 'm'.
+        Sa = [];
+        Sa.prefix = 'm';
+        Sa.circularise = 0; % (straight  = 0, phase angles = 1)
+        Sa.robust = 1; % use robust averaging (only for power)
+       
+   
+    
+        if doTF
+            
+            %parfor step 1: TF analysis
+            for subsub=1:Nsub
+                for subsess=1:2
+                    
+                    subnum = dosubs(subsub) ;
+                    cd(All_Sub{subnum}.megpath{subsess})
+                    S1 = Stf;
+                    S1.D =  All_Sub{subnum}.Stfname{subsess}
+                    testfilename12 = spm_select('FPlist', All_Sub{subnum}.megpath{subsess}, '^tf_.*mat');
+                    if length(testfilename12)<10
+                        D=spm_eeg_tf(S1);
+                    end
+                end
+            end
+            
+            
+            
+            redothesesubs =[];
+            for subsub=1:Nsub
+                for subsess=1:2
+                    subnum = dosubs(subsub) ;
+                    cd(All_Sub{subnum}.megpath{subsess})
+                    S3 = Scp;
+                    S3.D =  All_Sub{subnum}.Scpname{subsess} ;
+                    testfilename13 = spm_select('FPlist', All_Sub{subnum}.megpath{subsess}, '^Ptf.*mat');
+                    if length(testfilename13)<10
+                        testfilename13 = spm_select('FPlist', All_Sub{subnum}.megpath{subsess}, '^rPtf.*mat'); %if prev file has been deleted?
+                    end
+                    if length(testfilename13)<10
+                        try
+                            D = spm_eeg_combineplanar(S3)
+                        catch
+                            redothesesubs =  [mysubs{sub} ; redothesesubs];
+                            % if failing try going to line 204 in ft_sens_type
+                            % and changin input.label to abc = char(input.label), clear
+                            % input, input.label = abc
+                            
+                        end
+                    end
+                end
+            end
+            
+            redothesesubs %crop TF files?
+            for subsub=1:Nsub
+                parfor subsess=1:2
+                    subnum = dosubs(subsub) ;
+                    
+                    %step 4: rescale 'r'
+                    %'LogR' method rst computes the log of power and then baseline-corrects and scales the result
+                    %to produce values in dB. 'Di just does simple baseline subtraction. 'Rel' expresses the power
+                    %in % of the baseline units. Finally 'Log' and 'Sqrt' options just compute the respective functions
+                    %without baseline-correction.
+                    cd(All_Sub{subnum}.megpath{subsess})
+                    
+                    S4 = Srs;
+                    S4.D = All_Sub{subnum}.Srsname{subsess} ;
+                    testfilename14 = spm_select('FPlist', All_Sub{subnum}.megpath{subsess}, '^rPtf.*mat');
+                    if length(testfilename14)<10
+                        D=spm_eeg_tf_rescale(S4);
+                    end
+                end
+            end
+            
+            
+            for subsub=1:Nsub
+                parfor subsess=1:2
+                     subnum = dosubs(subsub) ;
+                    cd(All_Sub{subnum}.megpath{subsess})
+                    S2 = Sa;
+                    S2.D = All_Sub{subnum}.Saname{subsess} ;
+                    testfilename = spm_select('FPlist', All_Sub{subnum}.megpath{subsess}, '^mrPt.*mat');
+                    if length(testfilename)<10
+                        D = spm_eeg_average_TF(S2);
+                    end
+                end
+                
+            end
+        end
+    
+    %% remove some of the intermediate files: 
+    if delete_files
+        for subsub=1:Nsub
+            for subsess=1:2
+                subnum = dosubs(subsub) ;
+                delete ( spm_select('FPlist', All_Sub{subnum}.megpath{subsess}, '^tf_.*mat') );
+                delete ( spm_select('FPlist', All_Sub{subnum}.megpath{subsess}, '^mtf_.*mat') );
+                delete ( spm_select('FPlist', All_Sub{subnum}.megpath{subsess}, '^pmtf_.*mat') );
+                
+                delete ( spm_select('FPlist', All_Sub{subnum}.megpath{subsess}, '^tf_.*dat') );
+                delete ( spm_select('FPlist', All_Sub{subnum}.megpath{subsess}, '^mtf_.*dat') );
+                delete ( spm_select('FPlist', All_Sub{subnum}.megpath{subsess}, '^pmtf_.*dat') );
+                
+            end
+        end
+    
+end %TF analysis
+
+%% ***********************************************************************
+%% *****************  Create contrast and write images *************************************
+%% *****************     **********************************
+
+if docontrast
+    %% contrast 'w'
+    
+    for subsub=1:Nsub
+        for subsess=1:2
+            subnum = dosubs(subsub) ;
+            % step 2:average TF
+            cd(All_Sub{subnum}.megpath{subsess})
+            %if doTFontrast
+            S = [];
+            S.c = [ ...
+                repmat([1 1 1 1 1 1 0 0 ],1,4); ...
+                repmat([1 0 0 0 0 0 0 0 ],1,4); ...
+                repmat([0 1 0 0 0 0 0 0 ],1,4); ...
+                repmat([0 0 1 0 0 0 0 0 ],1,4); ...
+                repmat([0 0 0 1 0 0 0 0 ],1,4); ...
+                repmat([0 0 0 0 1 0 0 0 ],1,4); ...
+                repmat([0 0 0 0 0 1 0 0 ],1,4); ...
+                [1 1 1 1 1 1 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0  ]; ...
+                [0 0 0 0 0 0 0 0 1 1 1 1 1 1 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0  ]; ...
+                [0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 1 1 1 1 1 1 0 0 0 0 0 0 0 0 0 0 ]; ...
+                [0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 1 1 1 1 1 1 0 0  ]; ...
+                
+                repmat([1 -1 0 0 0 0 0 0 ],1,4); ...
+                repmat([1 0 -1 0 0 0 0 0 ],1,4); ...
+                repmat([1 0 0 -1 0 0 0 0 ],1,4); ...
+                repmat([1 0 0 0 -1 0 0 0 ],1,4); ...
+                repmat([1 0 0 0 0 -1 0 0 ],1,4); ...
+                [1 1 1 1 1 1 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 -1 -1 -1 -1 -1 -1 0 0 ]; ...
+                ];
+            
+            S.label = {'alltrials', 'Dev', 'Std2', 'Std3','Std4','Std5', 'Std6', 'speed1', 'speed2', 'speed3', 'speed4', ...
+                'Dev_v_Std2', 'Dev_v_Std3', 'Dev_v_Std4','Dev_v_Std5','Dev_v_Std6', 'FastvSlow'};
+            S.weighted = 1;
+            S.prefix = 'w2';
+            tffilename{subnum,subsess} = spm_select('FPlist', All_Sub{subnum}.megpath{subsess}, '^rPmtf_*.*mat')
+            testfilenameTF{subnum,subsess} = spm_select('FPlist', All_Sub{subnum}.megpath{subsess}, '^w2rPmtf_*.*mat');
+        end
+    end
+    
+    for subsub=1:Nsub
+        for subsess=1:2
+            subnum = dosubs(subsub) ;
+            
+            if length(testfilenameTF{subnum,subsess})<overwritefilesok{subnum}
+                S1 = S ;
+                S1.D = tffilename{subnum,subsess} ;
+                D = spm_eeg_contrast(S1);
+            end
+        end
+    end
+    
+    
+    %end
+    
+end
+    
+   
+if docontrast_alltrials
+   
+        
+        % S.conditions = {'alltrials', 'Dev', 'Std2', 'Std3','Std4','Std5', 'Std6', 'speed1', 'speed2', 'speed3', 'speed4' ...
+            %    'Dev_v_Std2', 'Dev_v_Std3', 'Dev_v_Std4','Dev_v_Std5','Dev_v_Std6', 'FastvSlow'};
+            
+        S.mode = 'time x frequency'  %'scalp x frequency'  % %'scalp x time' %'time x frequency'; %'scalp x frequency''
+        S.conditions = {'alltrials'} ; %{'Dev', 'Std6'};
+        S.channels= {'MEGCOMB'};
+        S.timewin = [-inf inf]; %[-inf inf]
+        S.freqwin= [-inf inf]; %[12 30];
+        
+        S.prefix= 'TxF_'  %SxT_Beta_' %'TxF_Beta_'; %'';
+        S.virtual= 0;
+        
+        
+        varargin.fwhm = [8 8 8];
+        varargin.dtype = 0;
+        varargin.im = 0
+        varargin.prefix = 's';
+        
+        for subsub=1:Nsub
+            for subsess=1:2
+                subnum = dosubs(subsub) ;
+                
+                testfilename3{subnum,subsess} = spm_select('FPlist', All_Sub{subnum}.megpath{subsess}, '^w2rPmtf_*.*mat');
+                [path, filenam, ext] = fileparts(testfilename3{subnum,subsess});
+                
+                testfilename1{subnum,subsess} = strcat(All_Sub{subnum}.megpath{subsess}, S.prefix, filenam, '/condition_', S.conditions{1}, '.nii' );
+            end
+        end
+        
+        
+       % parfor
+       for subsub=1:Nsub
+           for subsess=1:2
+               subnum = dosubs(subsub) ;
+               % [PATHSTR,filenam,EXT] = fileparts(testfilename{sub2});
+               % if exist( strcat(megpath2{sub2}, S.prefix, filenam))~=7
+               makeims = S;
+               makeims.D = testfilename3{subnum,subsess};
+               D = spm_eeg_convert2images(makeims);
+               
+               smoothims = varargin;
+               smoothims.data = {testfilename1{subnum,subsess}};
+               D = spm_run_smooth(smoothims);
+               
+               %  end
+           end
+           
+       end
+
+end
+
+
+
+
+
+
+if ParType
+    parpool close force CBU_Cluster
+end
+
+
