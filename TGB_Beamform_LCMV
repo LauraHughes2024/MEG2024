@@ -1,0 +1,274 @@
+% TGB Action / CAR task beamformer script generated from SPM 12 batch 
+% default settings used unless otherwise specified. 
+% -----------------------------------------------------------------------
+
+%-----------------------------------------------------------------------
+
+% uses 'BF' file created in AT_CoReg_batchscript_v2, as it recodes the
+% trials
+% uses FTD_2015_Scripts/beamformer/LEH_bf_write_nifti
+% bf_write_nifti edited to add images to specific folders
+
+
+
+clear all
+wd = '/imaging/lh01/FTD2015/MEG_DATA/ActionTask/';
+mripath = '/imaging/lh01/FTD2015/MRIs/';
+cd(wd)
+
+%% Matlab pool
+% ParType = 0;  % Fun on Login machines (not generally advised!)
+ParType = 1;   % Run maxfilter call on Compute machines using spmd (faster)
+%ParType = 2;   % Run on multiple Compute machines using parfor (best, but less feedback if crashes)
+
+% open matlabpool if required
+% matlabpool close force CBU_Cluster
+if ParType
+    NumWorkers = 11
+    P = cbupool(NumWorkers);
+    P.SubmitArguments = sprintf('--ntasks=%d --mem-per-cpu=8G --time=12:00:00 --constraint=maxfilter',NumWorkers);
+    parpool(P,NumWorkers)
+end
+
+whichsubs = 'Con'; % Con or Pat
+
+if strcmp(whichsubs , 'Con' )
+    All_Sub = TGB_SubsData_Controls();
+else
+    All_Sub = TGB_SubsData_Patients();
+end
+
+
+%% which subs to run
+dosubs = [];
+for sub = 1:length(All_Sub)
+    if All_Sub{sub}.CarTask == 1
+        dosubs = [dosubs sub];
+    end
+end
+
+Nsub     = length(dosubs);
+
+
+
+%% ************************************
+%%          freq and time windows
+%% ************************************
+timewin_whole = [-450 1950];
+
+wholebatch =1;
+justoutput = 0;
+
+%alpha
+% freq_name = 'Alpha'; freq = [8 12]; % [-450 -50] [50 450]
+%timewin{1} = [-450 -50]; timewin{2} = [50 450]; % alpha
+
+%%beta
+freq_name = 'Beta'; freq = [12 30];
+timewin{1} = [-450 -50]; timewin{2} = [550 950];  timewin{3} = [1050 1450]; timewin{4} = [1550 1950];
+
+
+
+%% ******* PreProc *************
+
+for sub=1:Nsub
+    subnum    = dosubs(sub)
+    
+    
+    % set up dir
+   Subs2run{subnum}.megpath2{1} = sprintf('%s%s/MF/SPM12analysis/BF_OSL/', wd, Subs2run{subnum}.Name{1});
+    Subs2run{subnum}. megpath2{2} = sprintf('%s%s/MF/SPM12analysis/BF_OSL/', wd, Subs2run{subnum}.Name{2});
+    
+    Subs2run{subnum}.coreg_file{1} = spm_select('FPlist', Subs2run{subnum}.megpath{1}, '^BF_caeM.*act1_trans.*.mat'  );
+    Subs2run{subnum}.coreg_file{2} = spm_select('FPlist', Subs2run{subnum}.megpath{2}, '^BF_caeM.*act1_trans.*.mat'  );
+    
+    % if there is no concatenated file
+    if length(Subs2run{subnum}.coreg_file{1}) < 10
+        Subs2run{subnum}.coreg_file{1}  = spm_select('FPlist', Subs2run{subnum}.megpath{1}, '^BF_aeM.*act1_trans.*.mat'  );
+    end
+    if length(Subs2run{subnum}.coreg_file{2}) < 10
+        Subs2run{subnum}.coreg_file{2}  = spm_select('FPlist', Subs2run{subnum}.megpath{2}, '^BF_aeM.*act1_trans.*.mat'  );
+    end
+      
+    for n = 1:2
+        rfxrootdir = Subs2run{subnum}.megpath2{n};
+        if exist(rfxrootdir)~=7; mkdir(rfxrootdir);end
+    end
+    
+    % Identify if files have already been created, or set to overwrite all
+    % files
+    Subs2run{subnum}.overwritefilesok{1} = Subs2run{subnum}.megpath2{1} +1;
+    Subs2run{subnum}.overwritefilesok{2} = Subs2run{subnum}.megpath2{2} +1;%set high to overwrite all files
+    
+    
+end
+
+    
+%% run whole batch
+if wholebatch
+    
+    matlabbatch1{1}.spm.tools.beamforming.data.val = 1;
+    matlabbatch1{1}.spm.tools.beamforming.data.gradsource = 'inv';
+    matlabbatch1{1}.spm.tools.beamforming.data.space = 'MNI-aligned';
+    matlabbatch1{1}.spm.tools.beamforming.data.overwrite = 1; %overwrite BF file if exists
+    matlabbatch1{2}.spm.tools.beamforming.sources.BF(1) = cfg_dep('Prepare data: BF.mat file', substruct('.','val', '{}',{1}, '.','val', '{}',{1}, '.','val', '{}',{1}, '.','val', '{}',{1}), substruct('.','BF'));
+    matlabbatch1{2}.spm.tools.beamforming.sources.reduce_rank = [1 2];
+    matlabbatch1{2}.spm.tools.beamforming.sources.keep3d = 1;
+    matlabbatch1{2}.spm.tools.beamforming.sources.plugin.grid.resolution = 8; %8mm
+    matlabbatch1{2}.spm.tools.beamforming.sources.plugin.grid.space = 'MNI template';
+    matlabbatch1{2}.spm.tools.beamforming.sources.visualise = 0;
+    matlabbatch{2}.spm.tools.beamforming.sources.plugin.mni_coords.pos              = mni_coords;
+   
+    matlabbatch1{3}.spm.tools.beamforming.features.BF(1) = cfg_dep('Define sources: BF.mat file', substruct('.','val', '{}',{2}, '.','val', '{}',{1}, '.','val', '{}',{1}, '.','val', '{}',{1}), substruct('.','BF'));
+    matlabbatch{3}.spm.tools.beamforming.features.whatconditions.all            = 1;
+    matlabbatch1{3}.spm.tools.beamforming.features.woi = timewin_whole; %%[-450 1950];
+    matlabbatch1{3}.spm.tools.beamforming.features.modality = {'MEGPLANAR'};
+    matlabbatch1{3}.spm.tools.beamforming.features.fuse = 'no';
+    matlabbatch1{3}.spm.tools.beamforming.features.plugin.csd.foi = [1 45] ; %[14 28];
+    matlabbatch1{3}.spm.tools.beamforming.features.plugin.csd.taper = 'dpss';
+    matlabbatch1{3}.spm.tools.beamforming.features.plugin.csd.keepreal = 1;
+    matlabbatch1{3}.spm.tools.beamforming.features.plugin.csd.hanning = 1;
+    matlabbatch1{3}.spm.tools.beamforming.features.regularisation.mantrunc.pcadim = 80; %essential
+    matlabbatch1{3}.spm.tools.beamforming.features.bootstrap = false;
+    matlabbatch1{4}.spm.tools.beamforming.inverse.BF(1) = cfg_dep('Covariance features: BF.mat file', substruct('.','val', '{}',{3}, '.','val', '{}',{1}, '.','val', '{}',{1}, '.','val', '{}',{1}), substruct('.','BF'));
+    matlabbatch1{4}.spm.tools.beamforming.inverse.plugin.lcmv.orient = true;
+    matlabbatch1{4}.spm.tools.beamforming.inverse.plugin.lcmv.keeplf = false;
+    %% parfor
+    for sub=1:Nsub
+        
+        subnum1    = dosubs(sub)
+        matlabbatch = matlabbatch1;
+        
+        for sess = 1:2
+            Subs2run{subnum1}.megpath2{sess}
+            matlabbatch{1}.spm.tools.beamforming.data.dir = {Subs2run{subnum1}.megpath2{sess}} %
+            matlabbatch{1}.spm.tools.beamforming.data.D = {Subs2run{subnum1}.coreg_file{sess}} %
+            
+            spm_jobman('run',matlabbatch);
+        end
+    end
+    
+end
+
+%% run output
+
+%% output of all conditions averaged
+justoutput_allconditionstogether = 1
+if justoutput_allconditionstogether
+    for nn = 1: size(timewin,2) %timewindows
+        
+        matlabbatch_2{1}.spm.tools.beamforming.output.plugin.image_power.whatconditions.all = 1;
+        matlabbatch_2{1}.spm.tools.beamforming.output.plugin.image_power.sametrials = true;
+        matlabbatch_2{1}.spm.tools.beamforming.output.plugin.image_power.woi = timewin{nn};
+        matlabbatch_2{1}.spm.tools.beamforming.output.plugin.image_power.foi = freq;
+        matlabbatch_2{1}.spm.tools.beamforming.output.plugin.image_power.contrast = 1;
+        matlabbatch_2{1}.spm.tools.beamforming.output.plugin.image_power.result = 'singleimage'; %'bycondition'; 'imagepertrial
+        matlabbatch_2{1}.spm.tools.beamforming.output.plugin.image_power.scale = 1;
+        matlabbatch_2{1}.spm.tools.beamforming.output.plugin.image_power.powermethod = 'trace';
+        matlabbatch_2{1}.spm.tools.beamforming.output.plugin.image_power.modality = 'MEGPLANAR';
+        
+        %write
+        S1 = [];
+        S1.normalise = 'all'; %'separate';
+        S1.space= 'mni';
+        
+        for sub=1:Nsub
+            for sess=1:2
+                subnum    = dosubs(sub);
+                cd( Subs2run{subnum}.megpath2{sess})
+                k{sub,sess}={strcat(Subs2run{subnum}.megpath2{sess}, 'BF.mat')};
+                outputname1{sub,sess} = strcat(Subs2run{subnum}.megpath2{sess},'AllTrials', '_time', num2str(timewin{nn}(1)), num2str(timewin{nn}(2)), '_', freq_name, num2str(freq(1)), num2str(freq(2)), '.nii' );
+            end
+        end
+        
+        for sub=1:Nsub %parfor
+            subnum    = dosubs(sub);
+            for sess=1:2
+                cd( Subs2run{subnum}.megpath2{sess})
+                matlabbatch = matlabbatch_2;
+                matlabbatch{1}.spm.tools.beamforming.output.BF =k{sub,sess}
+                S = S1;
+                S.outputname{1} = outputname1{sub,sess}; % dev
+                spm_jobman('run',matlabbatch);
+                
+                BF = load(strcat(Subs2run{subnum}.megpath2{sess}, 'BF.mat'));
+                LEH_bf_write_nifti(BF, S)
+            end
+        end
+    end
+end
+
+
+% BF for each trial type
+if justoutput
+    for nn = 1: size(timewin,2) %timewindows
+         matlabbatch_2{1}.spm.tools.beamforming.output.plugin.image_power.whatconditions.condlabel = {
+            'Dev1'
+            'Std2'
+            'Std3'
+            'Std4'
+            'Std5'
+            'Std6'
+            }';
+        
+        matlabbatch_2{1}.spm.tools.beamforming.output.plugin.image_power.sametrials = true;
+        matlabbatch_2{1}.spm.tools.beamforming.output.plugin.image_power.woi = timewin{nn};
+        matlabbatch_2{1}.spm.tools.beamforming.output.plugin.image_power.foi = freq;
+        matlabbatch_2{1}.spm.tools.beamforming.output.plugin.image_power.contrast = 1;
+        matlabbatch_2{1}.spm.tools.beamforming.output.plugin.image_power.result = 'bycondition';
+        matlabbatch_2{1}.spm.tools.beamforming.output.plugin.image_power.scale = 1;
+        matlabbatch_2{1}.spm.tools.beamforming.output.plugin.image_power.powermethod = 'trace';
+        matlabbatch_2{1}.spm.tools.beamforming.output.plugin.image_power.modality = 'MEGPLANAR';
+        
+        %write
+        S1 = [];
+        S1.normalise = 'all';
+        S1.space= 'mni';
+        
+        for sub=1:Nsub
+            for sess=1:2
+                subnum    = dosubs(sub);
+                cd( Subs2run{subnum}.megpath2{sess})
+                k{sub,sess}={strcat(Subs2run{subnum}.megpath2{sess}, 'BF.mat')};
+                outputname1{sub,sess} = strcat(Subs2run{subnum}.megpath2{sess},'Dev1', '_time', num2str(timewin{nn}(1)), num2str(timewin{nn}(2)), '_', freq_name, num2str(freq(1)), num2str(freq(2)), '.nii' );
+                outputname2{sub,sess} = strcat(Subs2run{subnum}.megpath2{sess},'Std2', '_time', num2str(timewin{nn}(1)), num2str(timewin{nn}(2)), '_', freq_name, num2str(freq(1)), num2str(freq(2)), '.nii' );
+                outputname3{sub,sess} = strcat(Subs2run{subnum}.megpath2{sess},'Std3', '_time', num2str(timewin{nn}(1)), num2str(timewin{nn}(2)), '_', freq_name, num2str(freq(1)), num2str(freq(2)), '.nii' );
+                outputname4{sub,sess} = strcat(Subs2run{subnum}.megpath2{sess},'Std4', '_time', num2str(timewin{nn}(1)), num2str(timewin{nn}(2)), '_', freq_name, num2str(freq(1)), num2str(freq(2)), '.nii' );
+                outputname5{sub,sess} = strcat(Subs2run{subnum}.megpath2{sess},'Std5', '_time', num2str(timewin{nn}(1)), num2str(timewin{nn}(2)), '_', freq_name, num2str(freq(1)), num2str(freq(2)), '.nii' );
+                outputname6{sub,sess} = strcat(Subs2run{subnum}.megpath2{sess},'Std6', '_time', num2str(timewin{nn}(1)), num2str(timewin{nn}(2)), '_', freq_name, num2str(freq(1)), num2str(freq(2)), '.nii');
+            end
+        end
+        
+        for sub=1:Nsub %parfor
+            subnum    = dosubs(sub);
+            for sess=1:2
+                cd( Subs2run{subnum}.megpath2{sess})
+                matlabbatch = matlabbatch_2;
+                matlabbatch{1}.spm.tools.beamforming.output.BF =k{sub,sess}
+                S = S1;
+                S.outputname{1} = outputname1{sub,sess}; % dev
+                S.outputname{2} = outputname2{sub,sess}; %std
+                S.outputname{3} = outputname3{sub,sess}; %std
+                S.outputname{4} = outputname4{sub,sess}; %std
+                S.outputname{5} = outputname5{sub,sess}; %std
+                S.outputname{6} = outputname6{sub,sess}; %std
+                
+                spm_jobman('run',matlabbatch);
+                
+                BF = load(strcat(Subs2run{subnum}.megpath2{sess}, 'BF.mat'));
+                LEH_bf_write_nifti(BF, S)
+            end
+        end
+    end
+end
+
+
+
+
+if ParType
+    parpool close force CBU_Cluster
+end
+
+
+    
+  
