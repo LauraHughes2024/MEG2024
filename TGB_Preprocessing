@@ -1,0 +1,819 @@
+% Action Task TGB Preprocessing pipeline SPM 12
+
+% spm('defaults', 'eeg');
+% This pipeline includes Converting fif files to .mat, TF analysis,
+
+% based on only trials with
+% movement (car position x<380)
+
+% Input files are the maxfiltered fif files
+% Sess is Drug / Placebo sess
+% Block is individual recorded blocks within each session
+
+% Needs to have behav txt files from task processed first.
+% see u://All_Work_Files/FTD_2015/Results/BehavSummary_txtfiles_Memantine
+
+%%
+clear all
+wd = '/imaging/lh01/FTD2015/MEG_DATA/ActionTask/';
+cd(wd)
+
+%% Matlab pool
+% ParType = 0;  % Fun on Login machines (not generally advised!)
+ParType = 1;   % Run maxfilter call on Compute machines using spmd (faster)
+%ParType = 2;   % Run on multiple Compute machines using parfor (best, but less feedback if crashes)
+
+% open matlabpool if required
+% matlabpool close force CBU_Cluster
+if ParType
+    NumWorkers = 11
+    P = cbupool(NumWorkers);
+    P.SubmitArguments = sprintf('--ntasks=%d --mem-per-cpu=8G --time=12:00:00 --constraint=maxfilter',NumWorkers);
+    parpool(P,NumWorkers)
+end
+
+whichsubs = 'Con'; % Con or Pat
+
+if strcmp(whichsubs , 'Con' )
+    All_Sub = TGB_SubsData_Controls();
+else
+    All_Sub = TGB_SubsData_Patients();
+end
+
+
+%% which subs to run
+dosubs = [];
+for sub = 1:length(All_Sub)
+    if All_Sub{sub}.CarTask == 1
+        dosubs = [dosubs sub];
+    end
+end
+
+
+%  delete(gcp) %close any open parpools
+Nsub     = length(dosubs);
+
+%% ***** SET Flags *********
+mftype = 'trans';
+preprocflag = 1;%
+dopreprocflag2 = 1; %convert, trigger check and ds and ICA
+dopreprocflag2a = 1; % filter blink epoch aretfact
+dopreprocflag3 = 1; %
+dontmerge = 1;
+doica = 1;
+
+
+averageflag = 1; %use this for separate averaging of evoked response
+
+
+%% TF analysis for averaged files
+% TF for individual trials in a separate script.
+tfanalysis = 0;
+tfanalysis2 = 0;
+doTF = 0;
+
+datatypes={'EEG', 'MEGPLANAR', 'MEG'};
+
+
+%% ** setup  file names and folder structure for preprocessing **
+for sub = 1:length(dosubs)
+    for sess = 1:2 %drug sess
+        n = dosubs(sub) ;
+        
+        megpath{sub,sess} = All_Sub{n}.megpath{sess};
+        MFpath{sub,sess} = All_Sub{n}.MFpath{sess} ;
+        Subname{sub,sess} = All_Sub{n}.Name{sess} ;
+        
+        cd(MFpath{sub,sess}) ;
+        PrPr{sub,sess}.transfiles = spm_select('List', MFpath{sub,sess}, '.*trans.*fif')  ;%% all files
+        PrPr{sub,sess}.blocknums = numel(dir('act*trans_*.fif')); %number of trans files
+        
+        overwritefilesok{sub,sess} = length(megpath{sub,sess}) +1; %set high to overwrite all files
+        
+        %% ***********************************************************************
+        %% **                         PREPROCESSING                             **
+        %% ***********************   make file names  ****************************
+        
+        for k = 1:PrPr{sub,sess}.blocknums; %
+            
+            %% ********   1. filenames  *****************
+            mftransfile{sub,sess}{k} =  PrPr{sub,sess}.transfiles(k,:);
+            [path1, filename1, dir1] = fileparts(mftransfile{sub,sess}{k})
+            
+            %convert
+            Sconvert1_filein{sub,sess}{k} = sprintf('%s%s', MFpath{sub,sess}, mftransfile{sub,sess}{k}) % *.fif file;
+            Sconvert1_fileout{sub,sess}{k} = sprintf('c_%s', mftransfile{sub,sess}{k});
+            
+            
+            % triggerchecks
+            TC1_filein{sub,sess}{k} = sprintf('c_%s.mat', filename1);
+            TC1_fileout{sub,sess}{k} = sprintf('t%s',  TC1_filein{sub,sess}{k});
+            
+            % downsample
+            Sds_filein{sub,sess}{k} =  TC1_fileout{sub,sess}{k};
+            Sds_fileout{sub,sess}{k} =  sprintf('d%s',  Sds_filein{sub,sess}{k});
+            
+            Seyeblink_filein{sub,sess}{k} =  Sds_fileout{sub,sess}{k};
+            %% no saved file here
+            
+            % Filter
+            Sfilter_filein{sub,sess}{k} =  Sds_fileout{sub,sess}{k};
+            Sfilter_fileout{sub,sess}{k} = sprintf('f%s', Sfilter_filein{sub,sess}{k} ); %;
+            
+            Sfiltern_filein{sub,sess}{k} =  Sfilter_fileout{sub,sess}{k};
+            Sfiltern_fileout{sub,sess}{k} = sprintf('f%s', Sfiltern_filein{sub,sess}{k} ); %;
+            
+            % Eye blink Montage blinks 'M'
+            Smont_filein{sub,sess}{k} = Sfiltern_fileout{sub,sess}{k};
+            Smont_fileout{sub,sess}{k} = sprintf('M%s',Smont_filein{sub,sess}{k});
+            
+            % Epoch
+            Sepoch_filein{sub,sess}{k} =  Smont_fileout{sub,sess}{k} ;
+            Sepoch_fileout{sub,sess}{k} = sprintf('e%s', Sepoch_filein{sub,sess}{k}) ;
+            
+            %artefact
+            Sart_infile{sub,sess}{k} = Sepoch_fileout{sub,sess}{k} ; %
+            Sart_outfile{sub,sess}{k} = sprintf('a%s', Sart_infile{sub,sess}{k} ) ;
+            
+            
+            % ***** 2. SPM settings ***************************************
+            
+            
+            %   Convert Data 'c'
+            Sconvert1{sub,sess}{k}.channels  = 'all';
+            Sconvert1{sub,sess}{k}.checkboundary = 1;
+            Sconvert1{sub,sess}{k}.dataset = Sconvert1_filein{sub,sess}{k};
+            Sconvert1{sub,sess}{k}.outfile = Sconvert1_fileout{sub,sess}{k};
+            
+            
+            %  trigger checks t
+            
+            %  downsample d
+            Sds{sub}.fsample_new = 250;  % - new sampling rate, must be lower than the original one
+            Sds{sub}.prefix = 'd'; %   - prefix for the output file (default - 'd')
+            
+            %   Filter Data: High pass 'f'
+            Sfilter{sub}.type = 'butterworth';
+            Sfilter{sub}.order = 5;
+            Sfilter{sub}.para = [];
+            Sfilter{sub}.band = 'high';
+            Sfilter{sub}.freq = 0.1; %0.1hz HPF
+            Sfilter{sub}.prefix = 'f';
+            
+            
+            %   Filter Data: Notch 'f'
+            Sfiltern{sub}.type = 'butterworth';
+            Sfiltern{sub}.order = 5;
+            Sfiltern{sub}.para = [];
+            Sfiltern{sub}.band = 'stop';
+            Sfiltern{sub}.freq = [48 52]; %0.1hz HPF
+            Sfiltern{sub}.prefix = 'f';
+            
+            
+            
+            % ****  Montage remove blinks Data: 'M'  ****
+            
+            % ****  Epoch 'e' ****
+            con_values{1} = [11, 21, 31]; %1st with gain 1, blocks 1,2,3
+            con_values{2} =   con_values{1}+1;
+            con_values{3} =   con_values{1}+2;
+            con_values{4} =   con_values{1}+3;
+            con_values{5} =   con_values{1}+4;
+            con_values{6} =  con_values{1}+5;
+            con_values{7} =  con_values{1}+6;
+            con_values{8} =  con_values{1}+7;
+            
+            nn = 8;
+            con_values{1+nn} = [41, 51, 61 ]; %1st with gain 2
+            con_values{2+nn} =   con_values{1+nn}+1;
+            con_values{3+nn} =   con_values{1+nn}+2;
+            con_values{4+nn} =   con_values{1+nn}+3;
+            con_values{5+nn} =   con_values{1+nn}+4;
+            con_values{6+nn} =  con_values{1+nn}+5;
+            con_values{7+nn} =  con_values{1+nn}+6;
+            con_values{8+nn} =  con_values{1+nn}+7;
+            
+            
+            nn = 16;
+            con_values{1+nn} = [71, 81, 91 ]; %1st with gain 3
+            con_values{2+nn} =   con_values{1+nn}+1;
+            con_values{3+nn} =   con_values{1+nn}+2;
+            con_values{4+nn} =   con_values{1+nn}+3;
+            con_values{5+nn} =   con_values{1+nn}+4;
+            con_values{6+nn} =  con_values{1+nn}+5;
+            con_values{7+nn} =  con_values{1+nn}+6;
+            con_values{8+nn} =  con_values{1+nn}+7;
+            
+            nn=24;
+            con_values{1+nn} = [101, 111, 121 ]; %1st with gain 4
+            con_values{2+nn} =   con_values{1+nn}+1;
+            con_values{3+nn} =   con_values{1+nn}+2;
+            con_values{4+nn} =   con_values{1+nn}+3;
+            con_values{5+nn} =   con_values{1+nn}+4;
+            con_values{6+nn} =  con_values{1+nn}+5;
+            con_values{7+nn} =  con_values{1+nn}+6;
+            con_values{8+nn} =  con_values{1+nn}+7;
+            
+            
+            con_labels = {'Dev1_1'; '1_2'; '1_3'; '1_4'; '1_5'; '1_6'; '1_7'; '1_8';  ...
+                'Dev2_1'; '2_2'; '2_3'; '2_4'; '2_5'; '2_6'; '2_7'; '2_8';  ...
+                'Dev3_1'; '3_2'; '3_3'; '3_4'; '3_5'; '3_6'; '3_7'; '3_8';  ...
+                'Dev4_1'; '4_2'; '4_3'; '4_4'; '4_5'; '4_6'; '4_7'; '4_8'  };
+            
+            for c = 1:length(con_values)
+                Sepoch{sub}.trialdef(c).conditionlabel = con_labels{c};
+                Sepoch{sub}.trialdef(c).eventtype      = 'STI101_up_new_withmovement';
+                Sepoch{sub}.trialdef(c).eventvalue     = con_values{c};
+                Sepoch{sub}.trialdef(c).trlshift = 34;  %  projection delay in ms
+            end
+            
+            Sepoch{sub}.reviewtrials = 0;
+            Sepoch{sub}.save = 0;
+            Sepoch{sub}.epochinfo.padding = 0;
+            Sepoch{sub}.prefix = 'e';
+            Sepoch{sub}.bc = 1;
+            Sepoch{sub}.timewin = [-800 2200]; %
+            
+            
+            % ****  Artefact 'a'  **** n
+            Sart{sub}.badchanthresh = 0.2; %20% bad trials = bad chan
+            
+            Sart{sub}.methods(1).channels = 'MEGPLANAR';
+            Sart{sub}.methods(1).fun = 'threshchan';
+            Sart{sub}.methods(1).settings.threshold = 900; %900
+            Sart{sub}.methods(2).channels = 'MEG'; %excludes planar
+            Sart{sub}.methods(2).fun = 'threshchan';
+            Sart{sub}.methods(2).settings.threshold = 2500 ;% 2500 %
+            
+            Sart{sub}.methods(3).fun = 'flat';
+            Sart{sub}.methods(3).channels = 'MEG';
+            Sart{sub}.methods(3).settings.threshold = 0;
+            Sart{sub}.methods(3).settings.seqlength = 4;
+            Sart{sub}.methods(4).fun = 'flat';
+            Sart{sub}.methods(4).channels = 'MEGPLANAR';
+            Sart{sub}.methods(4).settings.threshold = 0;
+            Sart{sub}.methods(4).settings.seqlength = 4;
+            
+            %reref eeg if there is eeg 'M'
+            
+        end %preprocflag
+    end %session
+end %
+
+%% Run the preprocessing
+if dopreprocflag2
+    
+    %% *************** PARFOR **************
+    for subsub = 1:length(dosubs)
+        for sess = 1:2
+            for n1 = 1: PrPr{subsub,sess}.blocknums   %% blocks
+                cd(megpath{subsub,sess}) ;
+                testfilename = spm_select('FPlist', megpath{subsub,sess}, sprintf('^c_act%d.*mat',n1));
+                
+                if length(testfilename)<overwritefilesok{subsub,sess}
+                    %% convert
+                    S1 = Sconvert1{subsub,sess}{n1} ;
+                    D = spm_eeg_convert(S1);
+                    
+                end
+            end
+        end
+    end
+    
+    %% trigger checks and ds
+    for subsub = 1:length(dosubs); %parfor
+        for sess = 1:2
+            for n2 = 1:PrPr{subsub,sess}.blocknums   %% blocks
+                cd(megpath{subsub,sess})
+                %% trigger checks
+                testfilename = spm_select('FPlist', megpath{subsub,sess}, sprintf('^tc_act%d.*mat',n2));
+                if length(testfilename)< overwritefilesok{subsub,sess}
+                    TC.D =  TC1_filein{subsub,sess}{n2};
+                    subname_4behav = Subname{subsub,sess} ;
+                    D = ActionTask_Triggervalues_FTD2015_v3(TC,subname_4behav,n2,PrPr{subsub,sess}.blocknums);
+                end
+                
+                %% down sample
+                S2half = Sds{subsub}
+                S2half.D =  Sds_filein{subsub,sess}{n2};%
+                testfilename = spm_select('FPlist', megpath{subsub,sess}, sprintf('^dtc_act%d.*mat',n2));
+                if length(testfilename) < overwritefilesok{subsub,sess}
+                    try
+                        D = spm_eeg_downsample(S2half)
+                    catch
+                    end
+                end
+            end
+        end
+    end
+    
+    
+    if doica
+        %% eyeblinks 'M'
+        %% apply ICA to all 3 modalities and all sessions using eeglab
+        addpath(genpath('/imaging/lh01/Meg_matlabscripts/Matlab_scripts/FTD_2015_Scripts/ica_scripts/'))
+        addpath(genpath('/imaging/lh01/eeglab13_3_2b'))
+        rmpath('/imaging/lh01/eeglab13_3_2b/functions/octavefunc/signal');
+        parfor subsub = 1:length(dosubs); %
+            for sess = 1:2
+                for n22 = 1:PrPr{subsub,sess}.blocknums  ; %% blocks
+                    cd(megpath{subsub,sess})
+                    
+                    S44 = Seyeblink_filein{subsub,sess}{n22};
+                    subdir = megpath{subsub,sess};
+                    savename = sprintf('ICA_files_sess%d_block%d', sess, n22);
+                    testfilename = spm_select('FPlist', megpath{subsub,sess}, sprintf('ICA_files_sess%d_block%d', sess, n22) );
+                    if length(testfilename) < 10 %ie has it been done already?
+                        D =  AT_ICA_function_v2(S44,subdir,savename,1,0,1) %filename, 1Do ICA,  0Do ICA2,DoICAEEG
+                    end
+                end
+            end
+        end
+    end
+end %dopreprocflag2
+
+if dopreprocflag2a
+    
+    parfor subsub = 1:length(dosubs); %parfor
+        for sess = 1:2
+            for n22 = 1:PrPr{subsub,sess}.blocknums   %% blocks
+                cd(megpath{subsub,sess})
+                
+                %filter dtc_act%d.*mat
+                myfiltertestfilename = spm_select('FPlist', megpath{subsub,sess}, sprintf('^f.*dtc_act%d.*mat',n22));
+                if length(myfiltertestfilename)< overwritefilesok{subsub,sess}
+                    S4 = Sfilter{subsub};
+                    S4.D = Sfilter_filein{subsub,sess}{n22}
+                    D = spm_eeg_filter(S4);
+                end
+                
+                myfiltertestfilename = spm_select('FPlist', megpath{subsub,sess}, sprintf('^ff.*dtc_act%d.*mat',n22));
+                if length(myfiltertestfilename)< overwritefilesok{subsub,sess}
+                    S4 = Sfiltern{subsub};
+                    S4.D = Sfiltern_filein{subsub,sess}{n22}
+                    D = spm_eeg_filter(S4);
+                end
+            end
+        end
+    end
+    
+    parfor subsub = 1:length(dosubs) %parfor
+        for sess = 1:2
+            for n22 = 1:PrPr{subsub,sess}.blocknums   %% blocks
+                cd(megpath{subsub,sess})
+                
+                % eyeblinks step 2 'M'
+                monttestfilename = spm_select('FPlist', megpath{subsub,sess}, sprintf('^Mff.*c_act%d.*mat',n22));
+                if length(monttestfilename) < overwritefilesok{subsub,sess}
+                    
+                    S99 = Smont_filein{subsub,sess}{n22}; %
+                    subdir = megpath{subsub,sess};
+                    savename = sprintf('ICA_files_sess%d_block%d', sess, n22); % just use 1st ICA file for montage
+                    D =  AT_ICA_function_v2(S99,subdir,savename,0,1,0) %filename, 1Do ICA,  0Do ICA2, DoICAEEG
+                end
+                
+            end
+        end
+    end
+    
+    parfor subsub = 1:length(dosubs) %parfor
+        for sess = 1:2
+            for n22 = 1:PrPr{subsub,sess}.blocknums   %% blocks
+                cd(megpath{subsub,sess})
+                
+                %epoch
+                testfilename = spm_select('FPlist', megpath{subsub,sess}, sprintf('^eMff.*c_act%d.*mat',n22));
+                if length(testfilename) <overwritefilesok{subsub,sess}
+                    S6 = Sepoch{subsub};
+                    S6.D = Sepoch_filein{subsub,sess}{n22};
+                    D = spm_eeg_epochs(S6);
+                end
+                
+            end
+        end
+    end
+    
+    parfor subsub = 1:length(dosubs); %parfor
+        for sess = 1:2
+            for n22 = 1:PrPr{subsub,sess}.blocknums   %% blocks
+                cd(megpath{subsub,sess})
+                
+                %artefact
+                testfilenameart = spm_select('FPlist', megpath{subsub,sess}, sprintf('^aeMff.*c_act%d.*mat',n22));
+                if length(testfilenameart) < overwritefilesok{subsub,sess}
+                    S9 = Sart{subsub};
+                    S9.D = Sart_infile{subsub,sess}{n22};
+                    D = spm_eeg_artefact(S9);
+                end
+            end
+        end %% do subs
+    end
+end % preproc2
+
+%% check artefacts: list of bad channels and bad trials
+check4artefacts = 0;
+if check4artefacts
+    abcnn = 0;
+    for sub = 1:length(dosubs) %parfor
+        for sess = 1:2
+            for n22 = 1:PrPr{sub,sess}.blocknums   %% blocks
+                cd(megpath{sub,sess})
+                abcnn = abcnn +1;
+                load  (Sart_outfile{sub,sess}{n22}) ;
+                clear mybad
+                mybad.c = struct2cell(D.channels);
+                badlist=cell2mat(mybad.c(2,1,:))  ; %
+                
+                sub_bcs{abcnn} = sprintf('%s_block %s bcs %s', megpath{sub,sess}, num2str(n22) , num2str(size(find(badlist))) );
+                sub_bts{abcnn}= sprintf('%s_block %s bts %s', megpath{sub,sess}, num2str(n22) , num2str(size(find([D.trials.bad]))) );
+                
+                %artefact
+                
+            end
+        end %% do subs
+    end
+end
+
+
+
+if dopreprocflag3 %
+    %  ****************  merge  sessions  ****************
+    %% cropping so all files have same channels - extra chan sometimes introducecd if recording has extra channels.
+    docrop = 1
+    if docrop
+        S = [];
+        Scrop.timewin = [-Inf Inf];
+        Scrop.freqwin = [-Inf Inf];
+        Scrop.channels = {'MEGPLANAR' 'MEGMAG' 'EEG'} ;
+        Scrop.prefix = 'p';
+        for subsub = 1:Nsub; %parfor
+            for sess = 1:2
+                
+                subnum    = dosubs(subsub);
+                cd(megpath{subsub})
+                File2crop{subsub,sess} = spm_select('FPlist', megpath{subsub,sess}, '^aeMff.*_act.*mat');
+            end
+        end
+        
+        parfor subsub = 1:Nsub; %parfor
+            for sess = 1:2
+                for n22 = 1:PrPr{subsub,sess}.blocknums   %% blocks
+                    
+                    testfilename = spm_select('FPlist', megpath{subsub,sess}, sprintf('^paeMff.*c_act%d.*mat',n22));
+                    if length(testfilename)<overwritefilesok{subsub,sess}
+                        cd(megpath{subsub})
+                        S = Scrop;
+                        S.D = File2crop{subsub,sess}(n22,:)
+                        spm_eeg_crop(S)
+                    end
+                end
+            end
+        end
+        
+    end
+    
+    % Merge blocks within session
+    domerge =1
+    if domerge
+        
+        for subsub = 1:Nsub %parfor
+            for sess = 1:2
+                subnum    = dosubs(subsub);
+                
+                cd(megpath{subsub})
+                if PrPr{subsub,sess}.blocknums  > 1
+                    fileinput.f1 = spm_select('FPlist', megpath{subsub,sess}, '^paeMff.*_act1.*mat'); % %all files
+                    fileinput.f2 = spm_select('FPlist', megpath{subsub,sess}, '^paeMff.*_act2.*mat');
+                    Smergefiles{subsub,sess}  = [fileinput.f1; fileinput.f2];
+                end
+                % %all files
+                if PrPr{subsub,sess}.blocknums   > 2
+                    fileinput.f3 = spm_select('FPlist', megpath{subsub,sess}, '^paeMffdtc_act3.*mat'); % %all files
+                    Smergefiles{subsub,sess}  = [fileinput.f1; fileinput.f2; fileinput.f3];
+                end
+                
+                [path,inputfilename,ext] = fileparts(spm_select('FPlist', megpath{subsub,sess}, '^paeMff.*_act1.*mat' ));
+                Smerge.recode = 'same';
+                outputfile{subsub,sess}  = sprintf('%sc%s', megpath{subsub,sess},inputfilename); %
+                Smerge.outfile = outputfile;
+                
+                
+            end
+        end
+        
+        for subsub = 1:Nsub; %parfor
+            for sess = 1:2
+                subnum    = dosubs(subsub);
+                cd(megpath{subsub,sess})
+                testfilename = spm_select('FPlist', megpath{subsub,sess},  '^cpaeMff.*_act1.*mat' )  ;
+                if length(testfilename)<overwritefilesok{subsub,sess}  & PrPr{subsub,sess}.blocknums  > 1
+                    
+                    S8 = Smerge;
+                    S8.D =  Smergefiles{subsub,sess}  ;
+                    S8.outfile = outputfile{subsub,sess};
+                    D = spm_eeg_merge(S8);
+                end
+            end %sess
+        end
+        
+    end %merge
+    
+    
+    
+    %   average 'm'
+    for subsub=1:Nsub
+        for sess = 1:2
+            cd(megpath{subsub,sess})
+            filetoavg = spm_select('FPlist', megpath{subsub,sess}, '^cpaeMf.*_act1.*mat' );
+            testfilenameavg{subsub,sess} = spm_select('FPlist', megpath{subsub,sess}, '^mcpaeMffdtc_act1.*mat' );
+            if length(filetoavg) <10
+                filetoavg = spm_select('FPlist', megpath{subsub,sess}, '^paeMf.*_act1.*mat' );
+                testfilenameavg{subsub,sess} = spm_select('FPlist', megpath{subsub,sess}, '^mpaeMffdtc_act1.*mat' );
+            end
+            
+            Savg{subsub,sess}.D  = filetoavg ;
+            Savg{subsub,sess}.robust = 1; % use robust averaging (only for power)
+            Savg{subsub,sess}.prefix = 'm';
+        end
+    end
+    parfor subsub=1:Nsub
+        for sess = 1:2
+            cd(megpath{subsub,sess})
+            
+            if length(testfilenameavg{subsub,sess})<  overwritefilesok{subsub,sess}
+                S = Savg{subsub,sess};
+                D = spm_eeg_average(S);
+            end
+        end
+    end
+    
+    %% LP filter 'f'
+    for subsub=1:Nsub
+        for sess = 1:2
+            cd(megpath{subsub,sess})
+            testfilename = spm_select('FPlist', megpath{subsub,sess}, '^fm.*aeM.*_act1.*mat')
+            if length(testfilename)<overwritefilesok{subsub,sess}
+                
+                S = [];
+                S.D =spm_select('FPlist', megpath{subsub,sess}, '^mc.*aeM.*_act1.*mat');
+                if length(S.D ) < 10
+                    S.D =spm_select('FPlist', megpath{subsub,sess}, '^m.*aeM.*_act1.*mat');
+                end
+                S.prefix = 'f';
+                S.type = 'butterworth';
+                S.order = 5;
+                S.para = [];
+                S.band = 'low';
+                S.freq = 40; %0.1hz HPF
+                D = spm_eeg_filter(S);
+            end
+        end
+    end
+    
+    
+
+
+%%% Time Frequency of sensor space for averaged files.
+% TF for trials see separate script.
+if tfanalysis
+    
+    %% TF analysis set up
+    for subsub=1:Nsub
+        cd(megpath2{subsub})
+        [path, base_filename, ext]  =fileparts(spm_select('FPlist', megpath2{subsub}, '^caeMf*.*mat' ) );
+        filename{subsub} = strcat(base_filename,ext);
+        %step 1: TF analysis
+        Stf = [];
+        Stf.channels= {'MEGPLANAR'}; %%
+        Stf.frequencies= [6:2:80]; %
+        Stf.settings.timewin = [-Inf Inf]; %[-500 2000]
+        Stf.phase= 0; %save phase not poss with multitaper
+        Stf.method= 'morlet' ;%'mtmconvol' ; %; %'mtmconvol';
+        Stf.settings.ncycles= 7; % higher value = greater freq res
+        Stf.prefix= ''; %
+        
+        % other methods
+        %         Stf.method= 'mtmconvol' ;%'mtmconvol' ; %; %'mtmconvol';
+        %         Stf.taper = 'hanning'; %      - taper to use ('hanning', 'rectwin', 'dpss', 'sine' or
+        %         %                    other possible inputs of 'window'
+        %         Stf.freqres = 5 %     - frequency resolutions (plus-minus for each frequency, can
+        %         %                    be a vector with a value per frequency)
+        %         %    S.frequencies - vector of frequencies
+        %         Stf.timeres = 50 %     - time resolution in ms (length of the sliding time-window)
+        %         Stf.timestep  = 50 %  - time step (in ms) to slide the time-window by.
+        %
+        
+        Stfname{subsub}  = strcat(megpath2{subsub}, filename{subsub})
+        %spm_select('FPlist', megpath2{subsub}, '^caeMf*.*mat' );
+        testfilename{subsub} = spm_select('FPlist', megpath2{subsub}, '^tf_ca*.*mat');
+        
+        
+        %step 2: average over trials 'm'
+        % Power data of single trials (see %sec. 12.8.10) can also be averaged by
+        % using the function spm eeg average TF. The prepended output letter is 'm'.
+        Sa = [];
+        Sa.prefix = 'm';
+        Sa.circularise = 0; % (straight  = 0, phase angles = 1)
+        Sa.robust = 1; % use robust averaging (only for power)
+        Saname{subsub}  = strcat(megpath2{subsub}, 'tf_',  filename{subsub});
+        
+        %step 3 combine planars 'P'
+        Scp = [];
+        Scp.mode = 'replace';
+        Scp.prefix = 'P';
+        Scpname{subsub}  = strcat(megpath2{subsub}, 'm', 'tf_', filename{subsub});
+        
+        %step 4: rescale 'r'
+        Srs=[];
+        Srs.method='LogR';
+        Srs.timewin=[-Inf 0];
+        Srsname{subsub}  = strcat(megpath2{subsub}, 'P', 'm', 'tf_', filename{subsub});
+        
+        
+    end
+    
+    if doTF
+        parfor sub=1:Nsub
+            %step 1: TF analysis
+            cd(megpath2{sub})
+            S = Stf;
+            S.D = Stfname{sub};
+            testfilename = spm_select('FPlist', megpath2{sub}, '^tf_.*mat');
+            if length(testfilename)<overwritefilesok2{sub}
+                D=spm_eeg_tf(S);
+            end
+        end
+        
+        parfor sub=1:Nsub
+            % step 2:average TF
+            cd(megpath2{sub})
+            S = Sa;
+            S.D = Saname{sub};
+            testfilename = spm_select('FPlist', megpath2{sub}, '^mtf_.*mat');
+            if length(testfilename)<overwritefilesok2{sub}
+                D = spm_eeg_average_TF(S);
+            end
+        end
+        redothesesubs =[];
+        
+        parfor sub=1:Nsub %parfor
+            %step3 combine planars
+            cd(megpath2{sub})
+            S = Scp;
+            S.D = Scpname{sub};
+            testfilename = spm_select('FPlist', megpath2{sub}, '^Pmtf.*mat');
+            if length(testfilename)<overwritefilesok2{sub}
+                try
+                    D = spm_eeg_combineplanar(S)
+                catch
+                    redothesesubs =  [mysubs{sub} ; redothesesubs];
+                    % if failing try going to line 204 in ft_sens_type
+                    % and changin input.label to abc = char(input.label), clear
+                    % input, input.label = abc
+                    
+                end
+            end
+        end
+        redothesesubs %crop TF files?
+        parfor sub=1:Nsub
+            %step 4: rescale 'r'
+            %'LogR' method rst computes the log of power and then baseline-corrects and scales the result
+            %to produce values in dB. 'Di just does simple baseline subtraction. 'Rel' expresses the power
+            %in % of the baseline units. Finally 'Log' and 'Sqrt' options just compute the respective functions
+            %without baseline-correction.
+            cd(megpath2{sub})
+            S = Srs;
+            S.D = Srsname{sub};
+            testfilename = spm_select('FPlist', megpath2{sub}, '^rPmtf.*mat');
+            if length(testfilename)<overwritefilesok2{sub}
+                D=spm_eeg_tf_rescale(S);
+            end
+        end
+    end
+    
+    
+end
+
+% different methods
+tfanalysis2 = 0
+if tfanalysis2
+    
+    %% TF analysis set up
+    for subsub=1:Nsub
+        cd(megpath2{subsub})
+        [path, base_filename, ext]  =fileparts(spm_select('FPlist', megpath2{subsub}, '^caeMf*.*mat' ) );
+        filename{subsub} = strcat(base_filename,ext);
+        %step 1: TF analysis
+        Stf = [];
+        Stf.channels= {'MEGPLANAR'}; %%
+        Stf.frequencies= [6:2:80]; %
+        Stf.settings.timewin = [-Inf Inf]; %[-500 2000]
+        Stf.phase= 0; %save phase not poss with multitaper
+        Stf.method= 'mtmconvol'; %'morlet' ;%'mtmconvol' ; %; %'mtmconvol';
+        %Stf.settings.ncycles= 9; %T3 = 5 %higher = greater freq res
+        Stf.prefix= 'T2'; %
+        % using defaults
+        % Stf.method= 'mtmconvol' ;%'mtmconvol' ; %; %'mtmconvol';
+        Stf.settings.taper = 'hanning'; %      - taper to use ('hanning', 'rectwin', 'dpss', 'sine' or
+        %                    other possible inputs of 'window'
+        % Stf.settings.freqres = 1 %     - frequency resolutions (plus-minus for each frequency, can
+        %                    be a vector with a value per frequency)
+        %    S.frequencies - vector of frequencies
+        Stf.settings.timeres = 400 %     - time resolution in ms (length of the sliding time-window)
+        Stf.settings.timestep  = 50 %  - time step (in ms) to slide the time-window by.
+        
+        
+        Stfname{subsub}  = strcat(megpath2{subsub}, filename{subsub})
+        %spm_select('FPlist', megpath2{subsub}, '^caeMf*.*mat' );
+        testfilename{subsub} = spm_select('FPlist', megpath2{subsub}, '^T2tf_a*.*mat');
+        
+        
+        %step 2: average over trials 'm'
+        % Power data of single trials (see %sec. 12.8.10) can also be averaged by
+        % using the function spm eeg average TF. The prepended output letter is 'm'.
+        Sa = [];
+        Sa.prefix = 'm';
+        Sa.circularise = 0; % (straight  = 0, phase angles = 1)
+        Sa.robust = 1; % use robust averaging (only for power)
+        Saname{subsub}  = strcat(megpath2{subsub}, 'T2tf_',  filename{subsub});
+        
+        %step 3 combine planars 'P'
+        Scp = [];
+        Scp.mode = 'replace';
+        Scp.prefix = 'P';
+        Scpname{subsub}  = strcat(megpath2{subsub}, 'm', 'T2tf_', filename{subsub});
+        
+        %step 4: rescale 'r'
+        Srs=[];
+        Srs.method='LogR';
+        Srs.timewin=[-Inf 0];
+        Srsname{subsub}  = strcat(megpath2{subsub}, 'P', 'm', 'T2tf_', filename{subsub});
+        
+        
+    end
+    
+    if doTF
+        parfor sub=1:Nsub
+            %step 1: TF analysis
+            cd(megpath2{sub})
+            S = Stf;
+            S.D = Stfname{sub};
+            testfilename = spm_select('FPlist', megpath2{sub}, '^T2tf_.*mat');
+            if length(testfilename)<overwritefilesok{sub}
+                D=spm_eeg_tf(S);
+            end
+        end
+        
+        parfor sub=1:Nsub
+            % step 2:average TF
+            cd(megpath2{sub})
+            S = Sa;
+            S.D = Saname{sub};
+            testfilename = spm_select('FPlist', megpath2{sub}, '^mT2tf_.*mat');
+            if length(testfilename)<overwritefilesok{sub}
+                D = spm_eeg_average_TF(S);
+            end
+        end
+
+        redothesesubs =[];
+        parfor sub=1:Nsub %parfor
+            %step3 combine planars
+            cd(megpath2{sub})
+            S = Scp;
+            S.D = Scpname{sub};
+            testfilename = spm_select('FPlist', megpath2{sub}, '^PmT2tf.*mat');
+            if length(testfilename)<overwritefilesok{sub}
+                try
+                    D = spm_eeg_combineplanar(S)
+                catch
+                    redothesesubs =  [mysubs{sub} ; redothesesubs];
+                    % if failing try going to line 204 in ft_sens_type
+                    % and changin input.label to abc = char(input.label), clear
+                    % input, input.label = abc
+                    
+                end
+            end
+        end
+
+        redothesesubs %crop TF files?
+        parfor sub=1:Nsub
+            %step 4: rescale 'r'
+            %'LogR' method rst computes the log of power and then baseline-corrects and scales the result
+            %to produce values in dB. 'Di just does simple baseline subtraction. 'Rel' expresses the power
+            %in % of the baseline units. Finally 'Log' and 'Sqrt' options just compute the respective functions
+            %without baseline-correction.
+            cd(megpath2{sub})
+            S = Srs;
+            S.D = Srsname{sub};
+            testfilename = spm_select('FPlist', megpath2{sub}, '^rPmT2tf.*mat');
+            if length(testfilename)<overwritefilesok{sub}
+                D=spm_eeg_tf_rescale(S);
+            end
+        end
+    end
+end  
+    
+if ParType
+    parpool close force CBU_Cluster
+end
+
